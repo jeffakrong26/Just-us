@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "just-us",
+  "compatibility_date": "2026-07-01",
+  "pages_build_output_dir": "dist",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "just-us-db",
+      "database_id": "23e3f1a5-07e2-431c-b44a-b06fa64b6d20"
+    }
+  ]
+}
