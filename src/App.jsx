@@ -2,13 +2,13 @@ import React, { useState, useEffect, useCallback } from "react";
 import { Heart, Lock, Car, Cat as CatIcon, Dog as DogIcon, Send, Sparkles, MapPin, Clock, Plus, Check, MessageCircleHeart, Target, Gamepad2, Camera, Shuffle, X, Eraser, Trophy, RotateCcw, Image as ImageIcon, Download } from "lucide-react";
 
 // ---- CONFIG: change this to whatever PIN you two want ----
-const PIN_CODE = "0805";
+const PIN_CODE = "0705";
 
 // ---- Cities & timezones ----
 const HOUSTON_TZ = "America/Chicago";
 const DANANG_TZ = "Asia/Ho_Chi_Minh";
 const DISTANCE_MILES = 8788;
-const ANNIVERSARY_DATE = "2026-05-08"; // full date, so "days together" can be counted
+const ANNIVERSARY_DATE = "2026-05-07"; // full date, so "days together" can be counted
 
 const AVATARS = ["🏎️", "🧑", "👩", "🌙", "☀️", "🎧", "✈️", "☕"];
 const MOOD_TAGS = ["Missing you", "Working", "Chilling", "Traveling", "Sleepy", "Excited"];
