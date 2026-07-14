@@ -133,15 +133,22 @@ async function safeSet(key, value, shared) {
   }
 }
 // Batch read (one round trip) via the prefix endpoint — used by the hug poller
-// since it needs both presence and hold state on every ~1s tick.
+// since it needs both presence and hold state on every ~1s tick. Returns
+// serverNow alongside entries so freshness checks can diff two timestamps
+// from the same clock rather than a local device clock against a remote one.
 async function safeGetPrefix(prefix) {
   try {
     const res = await fetch(`/api/kv?prefix=${encodeURIComponent(prefix)}`);
     const data = await res.json();
-    return data.entries || [];
+    return { entries: data.entries || [], serverNow: data.serverNow || null };
   } catch {
-    return [];
+    return { entries: [], serverNow: null };
   }
+}
+// D1's datetime('now') returns "YYYY-MM-DD HH:MM:SS" (UTC, no offset marker) —
+// needs an explicit "Z" or JS parses it as local time.
+function parseServerTime(sqlTimestamp) {
+  return new Date(sqlTimestamp.replace(" ", "T") + "Z").getTime();
 }
 
 // ---------- Hug button: presence + simultaneous-hold state ----------
@@ -167,7 +174,7 @@ function useHug(me, partner, enabled) {
 
   useEffect(() => {
     if (!enabled) return;
-    const beat = () => safeSet(`hug:${me}:presence`, { ts: Date.now() }, true);
+    const beat = () => safeSet(`hug:${me}:presence`, "online", true);
     beat();
     const id = setInterval(beat, PRESENCE_HEARTBEAT_MS);
     return () => clearInterval(id);
@@ -185,13 +192,17 @@ function useHug(me, partner, enabled) {
     if (!enabled) return;
     let cancelled = false;
     const poll = async () => {
-      const entries = await safeGetPrefix(`hug:${partner}:`);
+      const { entries, serverNow } = await safeGetPrefix(`hug:${partner}:`);
       if (cancelled) return;
-      const map = Object.fromEntries(entries.map((e) => [e.key, e.value]));
-      const presRaw = map[`hug:${partner}:presence`];
-      const holdRaw = map[`hug:${partner}:hold`];
-      const pres = presRaw ? JSON.parse(presRaw) : null;
-      setPartnerOnline(!!pres && Date.now() - pres.ts < PRESENCE_ONLINE_WINDOW_MS);
+      const map = Object.fromEntries(entries.map((e) => [e.key, e]));
+      const presEntry = map[`hug:${partner}:presence`];
+      const holdRaw = map[`hug:${partner}:hold`]?.value;
+      const online = !!(
+        presEntry &&
+        serverNow &&
+        parseServerTime(serverNow) - parseServerTime(presEntry.updatedAt) < PRESENCE_ONLINE_WINDOW_MS
+      );
+      setPartnerOnline(online);
       const hold = holdRaw ? JSON.parse(holdRaw) : null;
       const holding = !!(hold && hold.holding);
       setPartnerHolding(holding);
