@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Heart, Lock, Car, Cat as CatIcon, Dog as DogIcon, Send, Sparkles, MapPin, Clock, Plus, Check, MessageCircleHeart, Target, Gamepad2, Camera, Shuffle, X, Eraser, Trophy, RotateCcw, Image as ImageIcon, Download, Settings } from "lucide-react";
+import { Heart, Lock, Cat as CatIcon, Dog as DogIcon, Send, Sparkles, MapPin, Clock, Plus, Check, MessageCircleHeart, Target, Gamepad2, Camera, Shuffle, X, Eraser, RotateCcw, Image as ImageIcon, Download, Settings } from "lucide-react";
+import { BG, CORAL, GOLD, TEAL, CREAM, SectionCard } from "./theme.jsx";
+import RaceGame from "./Race.jsx";
 
 // ---- CONFIG: change this to whatever PIN you two want ----
 const PIN_CODE = "0705";
@@ -94,9 +96,6 @@ const MISSION_BANK = [
   { text: "Tell me your favorite thing about my body, no holding back.", tag: "flirty" },
   { text: "Write down a promise for our future and send a photo of it.", tag: "sweet" },
 ];
-
-const RACE_CHARACTERS = { jeff: "🏎️", natali: null };
-const NATALI_CHARACTER_OPTIONS = ["🚲", "🏍️", "🛵", "⛵️", "🚗"];
 
 function todayKey(offsetDays = 0) {
   const d = new Date();
@@ -560,16 +559,6 @@ export default function App() {
   );
 }
 
-// ---------- Design tokens ----------
-const BG = "linear-gradient(180deg, #0F1B33 0%, #14213D 55%, #1B2A4A 100%)";
-// The accent color is user-themeable (see ACCENT_PRESETS) — this reads the
-// --accent CSS variable set on the app root, so every existing CORAL usage
-// picks up the chosen theme without a per-component rewrite.
-const CORAL = "var(--accent, #FF6F5E)";
-const GOLD = "#FFC15E";
-const TEAL = "#35C9C1";
-const CREAM = "#F5EFE6";
-
 function GlobalStyle() {
   return (
     <style>{`
@@ -725,10 +714,6 @@ function CityClock({ label, clock, icon, align }) {
       </div>
     </div>
   );
-}
-
-function SectionCard({ children }) {
-  return <div className="rounded-2xl p-4 bg-white/5 border border-white/10 mb-4">{children}</div>;
 }
 
 // ---------- Status Tab ----------
@@ -1491,153 +1476,6 @@ function PlayTab({ me, partner }) {
       {sub === "guess" && <GuessGame me={me} partner={partner} />}
       {sub === "snaps" && <SnapsTab me={me} partner={partner} />}
     </div>
-  );
-}
-
-// ---------- Race Game (F1 oval, two cars, first to finish wins) ----------
-const TRACK_D = "M 30 130 C 30 60, 60 30, 150 30 C 240 30, 270 60, 270 130 C 270 155, 220 150, 150 150 C 80 150, 30 155, 30 130 Z";
-
-function RaceGame({ me, partner }) {
-  const [character, setCharacter] = useState(RACE_CHARACTERS[me] || null);
-  const [status, setStatus] = useState("idle"); // idle | racing | done
-  const [myProgress, setMyProgress] = useState(0);
-  const [partnerProgress, setPartnerProgress] = useState(0);
-  const [result, setResult] = useState(null); // {winner, myTime, partnerTime}
-  const startTimeRef = React.useRef(null);
-  const pollRef = React.useRef(null);
-  const pathRef = React.useRef(null);
-  const partnerCharRef = React.useRef(partner === "jeff" ? "🏎️" : "🚲");
-
-  useEffect(() => {
-    (async () => {
-      if (me === "natali") {
-        const saved = await safeGet("race-character", false);
-        if (saved) setCharacter(saved);
-      }
-      const pRaw = await safeGet(`race-character-of:${partner}`, true);
-      if (pRaw) partnerCharRef.current = pRaw;
-    })();
-    return () => clearInterval(pollRef.current);
-  }, [me, partner]);
-
-  const pickCharacter = async (c) => {
-    setCharacter(c);
-    await safeSet("race-character", c, false);
-    await safeSet(`race-character-of:${me}`, c, true);
-  };
-
-  const pointAt = (fraction) => {
-    const path = pathRef.current;
-    if (!path) return { x: 150, y: 90 };
-    const len = path.getTotalLength();
-    return path.getPointAtLength(fraction * len);
-  };
-
-  const pollPartner = () => {
-    pollRef.current = setInterval(async () => {
-      const raw = await safeGet(`race-progress:${partner}`, true);
-      if (raw) setPartnerProgress(JSON.parse(raw).progress);
-    }, 600);
-  };
-
-  const startRace = async () => {
-    startTimeRef.current = Date.now();
-    setMyProgress(0);
-    setPartnerProgress(0);
-    setResult(null);
-    setStatus("racing");
-    await safeSet(`race-progress:${me}`, { progress: 0 }, true);
-    await safeSet(`race-result:${me}`, null, true);
-    await safeSet(`race-result:${partner}`, null, true);
-    clearInterval(pollRef.current);
-    pollPartner();
-  };
-
-  const tap = async () => {
-    if (status !== "racing") return;
-    const next = Math.min(100, myProgress + 5);
-    setMyProgress(next);
-    await safeSet(`race-progress:${me}`, { progress: next }, true);
-    if (next >= 100) {
-      const finishTime = Date.now() - startTimeRef.current;
-      setStatus("done");
-      await safeSet(`race-result:${me}`, { finishTime }, true);
-      const partnerRaw = await safeGet(`race-result:${partner}`, true);
-      const partnerRes = partnerRaw ? JSON.parse(partnerRaw) : null;
-      if (partnerRes) {
-        clearInterval(pollRef.current);
-        setResult({ myTime: finishTime, partnerTime: partnerRes.finishTime, winner: finishTime <= partnerRes.finishTime ? me : partner });
-      } else {
-        setResult({ myTime: finishTime, partnerTime: null, winner: null });
-        clearInterval(pollRef.current);
-        pollRef.current = setInterval(async () => {
-          const raw = await safeGet(`race-result:${partner}`, true);
-          if (raw) {
-            const pr = JSON.parse(raw);
-            if (pr) {
-              setResult({ myTime: finishTime, partnerTime: pr.finishTime, winner: finishTime <= pr.finishTime ? me : partner });
-              clearInterval(pollRef.current);
-            }
-          }
-        }, 1200);
-      }
-    }
-  };
-
-  if (me === "natali" && !character) {
-    return (
-      <SectionCard>
-        <p className="text-sm mb-4 text-center" style={{ color: CREAM }}>Pick your racer</p>
-        <div className="flex gap-2 flex-wrap justify-center">
-          {NATALI_CHARACTER_OPTIONS.map((c) => (
-            <button key={c} onClick={() => pickCharacter(c)} className="w-14 h-14 rounded-xl flex items-center justify-center text-2xl bg-white/8">
-              {c}
-            </button>
-          ))}
-        </div>
-      </SectionCard>
-    );
-  }
-
-  const myPos = pointAt(myProgress / 100);
-  const partnerPos = pointAt(partnerProgress / 100);
-
-  return (
-    <SectionCard>
-      <div className="flex items-center justify-between mb-2">
-        <p className="text-xs uppercase tracking-wide opacity-50" style={{ color: CREAM }}>F1 Sprint</p>
-        {result?.winner && (
-          <span className="text-xs font-semibold" style={{ color: GOLD }}>
-            {result.winner === me ? "You won 🏆" : `${partner === "jeff" ? "Jeff" : "Natali"} won`}
-          </span>
-        )}
-      </div>
-      <svg viewBox="0 0 300 170" className="w-full mb-3">
-        <path ref={pathRef} d={TRACK_D} fill="none" stroke="rgba(255,255,255,0.14)" strokeWidth="20" strokeLinecap="round" />
-        <path d={TRACK_D} fill="none" stroke="rgba(245,239,230,0.35)" strokeWidth="1.5" strokeDasharray="3 6" />
-        <rect x="24" y="122" width="8" height="16" fill={CREAM} opacity="0.6" />
-        <text x={partnerPos.x} y={partnerPos.y + 5} fontSize="15" textAnchor="middle" opacity="0.75">{partnerCharRef.current}</text>
-        <text x={myPos.x} y={myPos.y + 5} fontSize="17" textAnchor="middle">{character}</text>
-      </svg>
-      <div className="flex justify-between text-[10px] mb-3 opacity-50" style={{ color: CREAM }}>
-        <span>You {Math.round(myProgress)}%</span>
-        <span>{partner === "jeff" ? "Jeff" : "Natali"} {Math.round(partnerProgress)}%</span>
-      </div>
-      {status !== "racing" ? (
-        <button onClick={startRace} className="w-full rounded-lg py-2.5 text-sm font-semibold" style={{ background: CORAL, color: "#14213D" }}>
-          {status === "done" ? "Race again" : "Start race"}
-        </button>
-      ) : (
-        <button onClick={tap} className="w-full rounded-lg py-3 text-sm font-bold" style={{ background: TEAL, color: "#0F1B33" }}>
-          TAP TO DRIVE
-        </button>
-      )}
-      {status === "done" && (
-        <p className="text-xs text-center mt-3 opacity-50" style={{ color: CREAM }}>
-          {result?.partnerTime == null ? `Waiting on ${partner === "jeff" ? "Jeff" : "Natali"} to finish…` : `Your time: ${(result.myTime / 1000).toFixed(1)}s · Theirs: ${(result.partnerTime / 1000).toFixed(1)}s`}
-        </p>
-      )}
-    </SectionCard>
   );
 }
 
