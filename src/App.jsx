@@ -275,7 +275,11 @@ const LOCATION_REFRESH_MS = 4 * 60 * 60 * 1000;
 const PARTNER_LOCATION_POLL_MS = 60000;
 
 async function detectLocation() {
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  // Browser/OS timezone is the permission-free fallback (used as-is when
+  // geolocation is denied); when geolocation succeeds we prefer the timezone
+  // the reverse-geocode lookup reports for the actual coordinates, since the
+  // device's own timezone setting can lag behind where someone actually is.
+  let timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
   let city = null;
   let region = null;
   if (navigator.geolocation) {
@@ -292,8 +296,10 @@ async function detectLocation() {
         data.countryCode === "US" && data.principalSubdivisionCode
           ? data.principalSubdivisionCode.split("-").pop()
           : data.countryCode || null;
+      const tzEntry = data.localityInfo?.informative?.find((e) => e.description === "time zone");
+      if (tzEntry?.name) timezone = tzEntry.name;
     } catch {
-      // denied or failed — city/region stay null, timezone fallback still works
+      // denied or failed — city/region stay null, browser timezone fallback still used
     }
   }
   return { city, region, timezone };
@@ -488,6 +494,8 @@ export default function App() {
   const presence = usePresence(identity, partner, enabled);
   const hug = useHug(identity, partner, enabled, presence.partnerOnline);
   const location = useLocation(identity, partner, enabled);
+  const jeffLocation = identity === "jeff" ? location.myLocation : location.partnerLocation;
+  const nataliLocation = identity === "natali" ? location.myLocation : location.partnerLocation;
 
   const themeVars = {
     "--accent": (ACCENT_PRESETS[theme.accent] || ACCENT_PRESETS.coral).hex,
@@ -525,7 +533,7 @@ export default function App() {
             onDismiss={hug.dismissBanner}
           />
         )}
-        <Header onOpenSettings={() => setSettingsOpen(true)} />
+        <Header onOpenSettings={() => setSettingsOpen(true)} jeffLocation={jeffLocation} nataliLocation={nataliLocation} />
         <main className="max-w-md mx-auto px-4 pb-28 pt-4">
           {tab === "status" && (
             <StatusTab me={identity} partner={partner} hug={hug} presence={presence} location={location} />
@@ -633,9 +641,14 @@ function IdentityGate({ onChoose }) {
   );
 }
 
-function Header({ onOpenSettings }) {
-  const houston = useClock(HOUSTON_TZ);
-  const danang = useClock(DANANG_TZ);
+function locationLabel(location, fallback) {
+  if (location?.city) return `${location.city}${location.region ? `, ${location.region}` : ""}`;
+  return fallback;
+}
+
+function Header({ onOpenSettings, jeffLocation, nataliLocation }) {
+  const houston = useClock(jeffLocation?.timezone || HOUSTON_TZ);
+  const danang = useClock(nataliLocation?.timezone || DANANG_TZ);
   return (
     <div className="pt-6 pb-4 px-4 max-w-md mx-auto">
       <div className="flex items-center justify-between mb-4">
@@ -649,12 +662,12 @@ function Header({ onOpenSettings }) {
       </div>
       <div className="rounded-2xl p-4 bg-white/5 border border-white/10">
         <div className="flex items-center justify-between">
-          <CityClock label="Houston" clock={houston} icon="🏎️" />
+          <CityClock label={locationLabel(jeffLocation, "Houston")} clock={houston} icon="🏎️" />
           <div className="flex-1 flex items-center justify-center relative h-6 mx-2">
             <div className="w-full border-t border-dashed border-white/25" />
             <div className="signal-dot absolute w-2 h-2 rounded-full" style={{ background: CORAL, left: "10%" }} />
           </div>
-          <CityClock label="Da Nang" clock={danang} icon="🌸" align="right" />
+          <CityClock label={locationLabel(nataliLocation, "Da Nang")} clock={danang} icon="🌸" align="right" />
         </div>
         <div className="mt-4 pt-3 border-t border-white/10 flex items-center justify-center gap-2">
           <MapPin size={14} color={TEAL} />
