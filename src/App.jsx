@@ -132,6 +132,145 @@ async function safeSet(key, value, shared) {
     // ignore
   }
 }
+// Batch read (one round trip) via the prefix endpoint — used by the hug poller
+// since it needs both presence and hold state on every ~1s tick.
+async function safeGetPrefix(prefix) {
+  try {
+    const res = await fetch(`/api/kv?prefix=${encodeURIComponent(prefix)}`);
+    const data = await res.json();
+    return data.entries || [];
+  } catch {
+    return [];
+  }
+}
+
+// ---------- Hug button: presence + simultaneous-hold state ----------
+const HUG_HOLD_MS = 30000;
+const PRESENCE_HEARTBEAT_MS = 15000;
+const PRESENCE_ONLINE_WINDOW_MS = 40000;
+const HUG_POLL_MS = 1000;
+
+function useHug(me, partner, enabled) {
+  const [partnerOnline, setPartnerOnline] = useState(false);
+  const [meHolding, setMeHolding] = useState(false);
+  const [partnerHolding, setPartnerHolding] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [showBurst, setShowBurst] = useState(false);
+  const [hugCount, setHugCount] = useState(0);
+  const [banner, setBanner] = useState(null);
+
+  const bothStartRef = React.useRef(null);
+  const seenPartnerSinceRef = React.useRef(null);
+  const completedRef = React.useRef(false);
+  const meHoldingRef = React.useRef(false);
+  useEffect(() => { meHoldingRef.current = meHolding; }, [meHolding]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const beat = () => safeSet(`hug:${me}:presence`, { ts: Date.now() }, true);
+    beat();
+    const id = setInterval(beat, PRESENCE_HEARTBEAT_MS);
+    return () => clearInterval(id);
+  }, [enabled, me]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    (async () => {
+      const raw = await safeGet("hugs-count", true);
+      setHugCount(raw ? parseInt(raw, 10) || 0 : 0);
+    })();
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const poll = async () => {
+      const entries = await safeGetPrefix(`hug:${partner}:`);
+      if (cancelled) return;
+      const map = Object.fromEntries(entries.map((e) => [e.key, e.value]));
+      const presRaw = map[`hug:${partner}:presence`];
+      const holdRaw = map[`hug:${partner}:hold`];
+      const pres = presRaw ? JSON.parse(presRaw) : null;
+      setPartnerOnline(!!pres && Date.now() - pres.ts < PRESENCE_ONLINE_WINDOW_MS);
+      const hold = holdRaw ? JSON.parse(holdRaw) : null;
+      const holding = !!(hold && hold.holding);
+      setPartnerHolding(holding);
+      if (holding && hold.since !== seenPartnerSinceRef.current) {
+        seenPartnerSinceRef.current = hold.since;
+        if (!meHoldingRef.current) setBanner({ id: hold.since });
+      }
+      if (!holding) seenPartnerSinceRef.current = null;
+    };
+    poll();
+    const id = setInterval(poll, HUG_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [enabled, partner]);
+
+  const completeHug = useCallback(async () => {
+    setShowBurst(true);
+    setTimeout(() => setShowBurst(false), 2600);
+    setMeHolding(false);
+    await safeSet(`hug:${me}:hold`, { holding: false }, true);
+    if (me === "jeff") {
+      const raw = await safeGet("hugs-count", true);
+      const next = (raw ? parseInt(raw, 10) || 0 : 0) + 1;
+      await safeSet("hugs-count", String(next), true);
+      setHugCount(next);
+      const petRaw = await safeGet("pet-state", true);
+      if (petRaw) {
+        const pet = JSON.parse(petRaw);
+        await safeSet("pet-state", { ...pet, xp: (pet.xp || 0) + 10 }, true);
+      }
+    } else {
+      setTimeout(async () => {
+        const raw = await safeGet("hugs-count", true);
+        setHugCount(raw ? parseInt(raw, 10) || 0 : 0);
+      }, 1500);
+    }
+  }, [me]);
+
+  useEffect(() => {
+    if (!(meHolding && partnerHolding)) {
+      bothStartRef.current = null;
+      completedRef.current = false;
+      setProgress(0);
+      return;
+    }
+    if (!bothStartRef.current) bothStartRef.current = Date.now();
+    const id = setInterval(() => {
+      const elapsed = Date.now() - bothStartRef.current;
+      if (elapsed >= HUG_HOLD_MS) {
+        setProgress(100);
+        if (!completedRef.current) {
+          completedRef.current = true;
+          completeHug();
+        }
+        clearInterval(id);
+      } else {
+        setProgress((elapsed / HUG_HOLD_MS) * 100);
+      }
+    }, 100);
+    return () => clearInterval(id);
+  }, [meHolding, partnerHolding, completeHug]);
+
+  const holdDown = async () => {
+    if (!enabled || !partnerOnline) return;
+    const since = Date.now();
+    setMeHolding(true);
+    await safeSet(`hug:${me}:hold`, { holding: true, since }, true);
+  };
+
+  const holdUp = async () => {
+    setMeHolding((was) => {
+      if (was) safeSet(`hug:${me}:hold`, { holding: false }, true);
+      return false;
+    });
+  };
+
+  const dismissBanner = () => setBanner(null);
+
+  return { partnerOnline, meHolding, partnerHolding, progress, showBurst, hugCount, holdDown, holdUp, banner, dismissBanner };
+}
 
 export default function App() {
   const [unlocked, setUnlocked] = useState(false);
@@ -155,6 +294,9 @@ export default function App() {
     setIdentity(who);
     await safeSet("identity", who, false);
   };
+
+  const partner = identity === "jeff" ? "natali" : identity === "natali" ? "jeff" : null;
+  const hug = useHug(identity, partner, unlocked && !!identity);
 
   if (!unlocked) {
     return (
@@ -181,20 +323,26 @@ export default function App() {
     return <IdentityGate onChoose={chooseIdentity} />;
   }
 
-  const partner = identity === "jeff" ? "natali" : "jeff";
-
   return (
     <div style={{ background: BG }} className="min-h-screen text-white font-body">
       <GlobalStyle />
+      {hug.banner && (
+        <HugBanner
+          partnerName={partner === "jeff" ? "Jeff" : "Natali"}
+          onOpen={() => { setTab("status"); hug.dismissBanner(); }}
+          onDismiss={hug.dismissBanner}
+        />
+      )}
       <Header />
       <main className="max-w-md mx-auto px-4 pb-28 pt-4">
-        {tab === "status" && <StatusTab me={identity} partner={partner} />}
+        {tab === "status" && <StatusTab me={identity} partner={partner} hug={hug} />}
         {tab === "pet" && <PetTab me={identity} partner={partner} />}
         {tab === "question" && <QuestionTab me={identity} partner={partner} />}
         {tab === "missions" && <MissionsTab me={identity} partner={partner} />}
         {tab === "play" && <PlayTab me={identity} partner={partner} />}
       </main>
       <BottomNav tab={tab} setTab={setTab} me={identity} />
+      {hug.showBurst && <HugBurst />}
     </div>
   );
 }
@@ -216,9 +364,12 @@ function GlobalStyle() {
       @keyframes pulseDot { 0%,100% { opacity:.3; transform: translateX(0);} 50% { opacity:1; transform: translateX(6px);} }
       @keyframes blink { 0%,90%,100% { transform: scaleY(1);} 95% { transform: scaleY(0.1);} }
       @keyframes breathe { 0%,100% { transform: scale(1);} 50% { transform: scale(1.04);} }
+      @keyframes hugPulseRing { 0%,100% { box-shadow: 0 0 0 0 rgba(255,111,94,0.35);} 50% { box-shadow: 0 0 0 14px rgba(255,111,94,0);} }
+      @keyframes heartPop { 0% { transform: translate(-50%,-50%) scale(0.3) rotate(var(--rot,0deg)); opacity:0; } 15% { opacity:1; } 100% { transform: translate(calc(-50% + var(--dx,0px)), calc(-50% + var(--dy,0px))) scale(1.15) rotate(var(--rot,0deg)); opacity:0; } }
       .signal-dot { animation: pulseDot 2.2s ease-in-out infinite; }
       .pet-eye { animation: blink 4s infinite; transform-origin: center; }
       .pet-body { animation: breathe 3s ease-in-out infinite; }
+      .hug-pulse { animation: hugPulseRing 1.6s ease-in-out infinite; }
     `}</style>
   );
 }
@@ -357,7 +508,7 @@ function SectionCard({ children }) {
 }
 
 // ---------- Status Tab ----------
-function StatusTab({ me, partner }) {
+function StatusTab({ me, partner, hug }) {
   const [myStatus, setMyStatus] = useState({ emoji: "🏎️", text: "", tag: "", updatedAt: null });
   const [theirStatus, setTheirStatus] = useState(null);
   const [text, setText] = useState("");
@@ -382,6 +533,7 @@ function StatusTab({ me, partner }) {
 
   return (
     <div>
+      <HugButton me={me} partner={partner} hug={hug} />
       <SectionCard>
         <p className="text-xs uppercase tracking-wide opacity-50 mb-3" style={{ color: CREAM }}>Your status</p>
         <div className="flex gap-2 flex-wrap mb-3">
@@ -439,6 +591,114 @@ function StatusTab({ me, partner }) {
         )}
         <button onClick={load} className="text-xs mt-3 opacity-60 underline" style={{ color: CREAM }}>refresh</button>
       </SectionCard>
+    </div>
+  );
+}
+
+function HugButton({ me, partner, hug }) {
+  const { partnerOnline, meHolding, partnerHolding, progress, holdDown, holdUp, hugCount } = hug;
+  const partnerName = partner === "jeff" ? "Jeff" : "Natali";
+  const bothHolding = meHolding && partnerHolding;
+
+  if (!partnerOnline) {
+    return (
+      <SectionCard>
+        <div className="flex flex-col items-center py-3 text-center">
+          <div className="w-24 h-24 rounded-full flex items-center justify-center mb-3" style={{ background: "rgba(255,255,255,0.05)" }}>
+            <Heart size={28} color="rgba(245,239,230,0.25)" />
+          </div>
+          <p className="text-xs opacity-50" style={{ color: CREAM }}>Available when you're both online</p>
+        </div>
+      </SectionCard>
+    );
+  }
+
+  const ringPct = Math.min(100, progress);
+  const circumference = 2 * Math.PI * 54;
+  const dashOffset = circumference * (1 - ringPct / 100);
+
+  let label = "Press & hold together";
+  if (bothHolding) label = `${Math.max(1, Math.ceil((100 - ringPct) / 100 * 30))}s to go…`;
+  else if (meHolding) label = `Waiting for ${partnerName}…`;
+  else if (partnerHolding) label = `${partnerName} is waiting — hold to join!`;
+
+  return (
+    <SectionCard>
+      <p className="text-xs uppercase tracking-wide opacity-50 mb-3 text-center" style={{ color: CREAM }}>Hug button</p>
+      <div className="flex flex-col items-center py-2">
+        <button
+          onPointerDown={(e) => { e.preventDefault(); holdDown(); }}
+          onPointerUp={holdUp}
+          onPointerLeave={holdUp}
+          onPointerCancel={holdUp}
+          onContextMenu={(e) => e.preventDefault()}
+          className={`relative w-32 h-32 rounded-full flex items-center justify-center select-none ${(meHolding || partnerHolding) && !bothHolding ? "hug-pulse" : ""}`}
+          style={{ background: bothHolding ? "rgba(255,111,94,0.18)" : "rgba(255,255,255,0.08)", touchAction: "none" }}
+        >
+          <svg className="absolute inset-0 -rotate-90" width="128" height="128" viewBox="0 0 128 128">
+            <circle cx="64" cy="64" r="54" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="8" />
+            {bothHolding && (
+              <circle
+                cx="64" cy="64" r="54" fill="none" stroke={CORAL} strokeWidth="8" strokeLinecap="round"
+                strokeDasharray={circumference} strokeDashoffset={dashOffset}
+                style={{ transition: "stroke-dashoffset 0.1s linear" }}
+              />
+            )}
+          </svg>
+          <Heart size={40} color={CORAL} fill={meHolding || bothHolding ? CORAL : "none"} />
+        </button>
+        <p className="text-xs mt-3 text-center" style={{ color: CREAM, opacity: 0.7 }}>{label}</p>
+        <p className="text-[10px] mt-1 opacity-40" style={{ color: CREAM }}>Hugs: {hugCount}</p>
+      </div>
+    </SectionCard>
+  );
+}
+
+function HugBanner({ partnerName, onOpen, onDismiss }) {
+  return (
+    <div className="fixed top-0 left-0 right-0 z-40 px-4 pt-3">
+      <div className="max-w-md mx-auto rounded-xl px-4 py-3 flex items-center justify-between gap-3 shadow-lg" style={{ background: CORAL }}>
+        <button onClick={onOpen} className="text-sm font-semibold text-left flex-1" style={{ color: "#14213D" }}>
+          {partnerName} wants to hug 🫂 — hold the button on Status
+        </button>
+        <button onClick={onDismiss} aria-label="Dismiss"><X size={16} color="#14213D" /></button>
+      </div>
+    </div>
+  );
+}
+
+function HugBurst() {
+  const hearts = React.useMemo(
+    () =>
+      Array.from({ length: 18 }, (_, i) => ({
+        id: i,
+        dx: (Math.random() - 0.5) * 320,
+        dy: (Math.random() - 0.5) * 480,
+        rot: Math.random() * 360,
+        delay: Math.random() * 0.3,
+        size: 16 + Math.random() * 22,
+      })),
+    []
+  );
+  return (
+    <div className="fixed inset-0 pointer-events-none flex items-center justify-center z-50">
+      {hearts.map((h) => (
+        <span
+          key={h.id}
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            "--dx": `${h.dx}px`,
+            "--dy": `${h.dy}px`,
+            "--rot": `${h.rot}deg`,
+            animation: `heartPop 1.4s ease-out ${h.delay}s forwards`,
+            fontSize: h.size,
+          }}
+        >
+          💕
+        </span>
+      ))}
     </div>
   );
 }
