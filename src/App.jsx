@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Heart, Lock, Car, Cat as CatIcon, Dog as DogIcon, Send, Sparkles, MapPin, Clock, Plus, Check, MessageCircleHeart, Target, Gamepad2, Camera, Shuffle, X, Eraser, Trophy, RotateCcw, Image as ImageIcon, Download } from "lucide-react";
+import { Heart, Lock, Car, Cat as CatIcon, Dog as DogIcon, Send, Sparkles, MapPin, Clock, Plus, Check, MessageCircleHeart, Target, Gamepad2, Camera, Shuffle, X, Eraser, Trophy, RotateCcw, Image as ImageIcon, Download, Settings } from "lucide-react";
 
 // ---- CONFIG: change this to whatever PIN you two want ----
 const PIN_CODE = "0705";
@@ -10,8 +10,33 @@ const DANANG_TZ = "Asia/Ho_Chi_Minh";
 const DISTANCE_MILES = 8788;
 const ANNIVERSARY_DATE = "2026-05-07"; // full date, so "days together" can be counted
 
-const AVATARS = ["🏎️", "🧑", "👩", "🌙", "☀️", "🎧", "✈️", "☕"];
 const MOOD_TAGS = ["Missing you", "Working", "Chilling", "Traveling", "Sleepy", "Excited"];
+const MOOD_SENTENCE = {
+  "Missing you": "is missing you",
+  Working: "is working",
+  Chilling: "is chilling",
+  Traveling: "is traveling",
+  Sleepy: "is sleepy",
+  Excited: "is excited",
+};
+
+const ONLINE_GREEN = "#3ECF6B";
+
+const ACCENT_PRESETS = {
+  coral: { hex: "#FF6F5E", label: "Coral" },
+  teal: { hex: "#35C9C1", label: "Teal" },
+  gold: { hex: "#FFC15E", label: "Gold" },
+  berry: { hex: "#E85D9E", label: "Berry" },
+  sky: { hex: "#5B9BD5", label: "Sky" },
+  lavender: { hex: "#9B87F5", label: "Lavender" },
+};
+const FONT_PRESETS = {
+  classic: { label: "Classic", display: "'Fraunces', serif", body: "'Manrope', sans-serif" },
+  clean: { label: "Clean", display: "'Poppins', sans-serif", body: "'Inter', sans-serif" },
+  handwritten: { label: "Handwritten", display: "'Caveat', cursive", body: "'Nunito', sans-serif" },
+  playful: { label: "Playful", display: "'Baloo 2', cursive", body: "'Quicksand', sans-serif" },
+};
+const DEFAULT_THEME = { accent: "coral", font: "classic" };
 
 // Original set of connection-deepening questions, written in plain English on purpose.
 const QUESTION_BANK = [
@@ -150,15 +175,168 @@ async function safeGetPrefix(prefix) {
 function parseServerTime(sqlTimestamp) {
   return new Date(sqlTimestamp.replace(" ", "T") + "Z").getTime();
 }
+// Single-key read that keeps the server's updated_at — used wherever a
+// "2 min ago" style label needs an anchor that isn't the writer's own clock.
+async function safeGetMeta(key) {
+  try {
+    const res = await fetch(`/api/kv/${encodeURIComponent(key)}`);
+    const data = await res.json();
+    return { value: data.value ?? null, updatedAt: data.updatedAt ?? null };
+  } catch {
+    return { value: null, updatedAt: null };
+  }
+}
+function toEpoch(ts) {
+  if (!ts) return null;
+  const iso = ts.includes("T") ? ts : ts.replace(" ", "T") + "Z";
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? null : t;
+}
+function relativeTime(ts) {
+  const epoch = toEpoch(ts);
+  if (epoch == null) return "";
+  const sec = Math.max(0, Math.round((Date.now() - epoch) / 1000));
+  if (sec < 45) return "just now";
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return new Date(epoch).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
 
-// ---------- Hug button: presence + simultaneous-hold state ----------
+// ---------- Presence: shared online/last-active heartbeat ----------
+// One heartbeat + poller for the whole app — the Status dashboard's presence
+// dot and the hug button's "are we both online" gate both read from this,
+// instead of each feature keeping its own separate heartbeat.
+const PRESENCE_HEARTBEAT_MS = 20000;
+const PRESENCE_ONLINE_WINDOW_MS = 90000;
+const PRESENCE_POLL_MS = 2000;
+
+function usePresence(me, partner, enabled) {
+  const [partnerOnline, setPartnerOnline] = useState(false);
+  const [partnerLastActiveMs, setPartnerLastActiveMs] = useState(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const beat = () => {
+      if (!document.hidden) safeSet(`presence:${me}`, "online", true);
+    };
+    beat();
+    const id = setInterval(beat, PRESENCE_HEARTBEAT_MS);
+    const onVisible = () => { if (!document.hidden) beat(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [enabled, me]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const poll = async () => {
+      const { entries, serverNow } = await safeGetPrefix("presence:");
+      if (cancelled || !serverNow) return;
+      const map = Object.fromEntries(entries.map((e) => [e.key, e]));
+      const entry = map[`presence:${partner}`];
+      if (!entry) {
+        setPartnerOnline(false);
+        setPartnerLastActiveMs(null);
+        return;
+      }
+      const delta = parseServerTime(serverNow) - parseServerTime(entry.updatedAt);
+      setPartnerLastActiveMs(delta);
+      setPartnerOnline(delta < PRESENCE_ONLINE_WINDOW_MS);
+    };
+    poll();
+    const id = setInterval(poll, PRESENCE_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [enabled, partner]);
+
+  return { partnerOnline, partnerLastActiveMs };
+}
+
+function formatDuration(ms) {
+  if (ms == null) return null;
+  const sec = Math.max(0, Math.round(ms / 1000));
+  if (sec < 60) return "just now";
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  return `${day}d ago`;
+}
+
+// ---------- Location: one-shot-per-session city + timezone lookup ----------
+// Not continuous GPS tracking — just a city-level label + IANA timezone,
+// refreshed occasionally so it stays right if someone travels mid-session.
+const LOCATION_REFRESH_MS = 4 * 60 * 60 * 1000;
+const PARTNER_LOCATION_POLL_MS = 60000;
+
+async function detectLocation() {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  let city = null;
+  let region = null;
+  if (navigator.geolocation) {
+    try {
+      const pos = await new Promise((resolve, reject) =>
+        navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000, maximumAge: 3600000 })
+      );
+      const res = await fetch(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${pos.coords.latitude}&longitude=${pos.coords.longitude}&localityLanguage=en`
+      );
+      const data = await res.json();
+      city = data.city || data.locality || null;
+      region =
+        data.countryCode === "US" && data.principalSubdivisionCode
+          ? data.principalSubdivisionCode.split("-").pop()
+          : data.countryCode || null;
+    } catch {
+      // denied or failed — city/region stay null, timezone fallback still works
+    }
+  }
+  return { city, region, timezone };
+}
+
+function useLocation(me, partner, enabled) {
+  const [myLocation, setMyLocation] = useState(null);
+  const [partnerLocation, setPartnerLocation] = useState(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const publish = async () => {
+      const loc = await detectLocation();
+      if (cancelled) return;
+      setMyLocation(loc);
+      await safeSet(`location:${me}`, loc, true);
+    };
+    publish();
+    const id = setInterval(publish, LOCATION_REFRESH_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [enabled, me]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const load = async () => {
+      const raw = await safeGet(`location:${partner}`, true);
+      if (!cancelled) setPartnerLocation(raw ? JSON.parse(raw) : null);
+    };
+    load();
+    const id = setInterval(load, PARTNER_LOCATION_POLL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [enabled, partner]);
+
+  return { myLocation, partnerLocation };
+}
+
+// ---------- Hug button: simultaneous-hold state (presence comes from usePresence) ----------
 const HUG_HOLD_MS = 30000;
-const PRESENCE_HEARTBEAT_MS = 15000;
-const PRESENCE_ONLINE_WINDOW_MS = 40000;
 const HUG_POLL_MS = 1000;
 
-function useHug(me, partner, enabled) {
-  const [partnerOnline, setPartnerOnline] = useState(false);
+function useHug(me, partner, enabled, partnerOnline) {
   const [meHolding, setMeHolding] = useState(false);
   const [partnerHolding, setPartnerHolding] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -174,14 +352,6 @@ function useHug(me, partner, enabled) {
 
   useEffect(() => {
     if (!enabled) return;
-    const beat = () => safeSet(`hug:${me}:presence`, "online", true);
-    beat();
-    const id = setInterval(beat, PRESENCE_HEARTBEAT_MS);
-    return () => clearInterval(id);
-  }, [enabled, me]);
-
-  useEffect(() => {
-    if (!enabled) return;
     (async () => {
       const raw = await safeGet("hugs-count", true);
       setHugCount(raw ? parseInt(raw, 10) || 0 : 0);
@@ -192,18 +362,9 @@ function useHug(me, partner, enabled) {
     if (!enabled) return;
     let cancelled = false;
     const poll = async () => {
-      const { entries, serverNow } = await safeGetPrefix(`hug:${partner}:`);
+      const raw = await safeGet(`hug:${partner}:hold`, true);
       if (cancelled) return;
-      const map = Object.fromEntries(entries.map((e) => [e.key, e]));
-      const presEntry = map[`hug:${partner}:presence`];
-      const holdRaw = map[`hug:${partner}:hold`]?.value;
-      const online = !!(
-        presEntry &&
-        serverNow &&
-        parseServerTime(serverNow) - parseServerTime(presEntry.updatedAt) < PRESENCE_ONLINE_WINDOW_MS
-      );
-      setPartnerOnline(online);
-      const hold = holdRaw ? JSON.parse(holdRaw) : null;
+      const hold = raw ? JSON.parse(raw) : null;
       const holding = !!(hold && hold.holding);
       setPartnerHolding(holding);
       if (holding && hold.since !== seenPartnerSinceRef.current) {
@@ -292,11 +453,21 @@ export default function App() {
   const [loadingIdentity, setLoadingIdentity] = useState(true);
 
   const [tab, setTab] = useState("status");
+  const [theme, setTheme] = useState(DEFAULT_THEME);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     (async () => {
       const id = await safeGet("identity", false);
       if (id === "jeff" || id === "natali") setIdentity(id);
+      const storedTheme = await safeGet("theme", false);
+      if (storedTheme) {
+        try {
+          setTheme({ ...DEFAULT_THEME, ...JSON.parse(storedTheme) });
+        } catch {
+          // ignore corrupt local theme data, defaults still apply
+        }
+      }
       setLoadingIdentity(false);
     })();
   }, []);
@@ -306,11 +477,27 @@ export default function App() {
     await safeSet("identity", who, false);
   };
 
-  const partner = identity === "jeff" ? "natali" : identity === "natali" ? "jeff" : null;
-  const hug = useHug(identity, partner, unlocked && !!identity);
+  const updateTheme = async (patch) => {
+    const next = { ...theme, ...patch };
+    setTheme(next);
+    await safeSet("theme", next, false);
+  };
 
+  const partner = identity === "jeff" ? "natali" : identity === "natali" ? "jeff" : null;
+  const enabled = unlocked && !!identity;
+  const presence = usePresence(identity, partner, enabled);
+  const hug = useHug(identity, partner, enabled, presence.partnerOnline);
+  const location = useLocation(identity, partner, enabled);
+
+  const themeVars = {
+    "--accent": (ACCENT_PRESETS[theme.accent] || ACCENT_PRESETS.coral).hex,
+    "--font-display": (FONT_PRESETS[theme.font] || FONT_PRESETS.classic).display,
+    "--font-body": (FONT_PRESETS[theme.font] || FONT_PRESETS.classic).body,
+  };
+
+  let content;
   if (!unlocked) {
-    return (
+    content = (
       <PinGate
         pinInput={pinInput}
         setPinInput={setPinInput}
@@ -324,43 +511,53 @@ export default function App() {
         }}
       />
     );
-  }
-
-  if (loadingIdentity) {
-    return <div style={{ background: BG }} className="min-h-screen flex items-center justify-center text-white">Loading…</div>;
-  }
-
-  if (!identity) {
-    return <IdentityGate onChoose={chooseIdentity} />;
+  } else if (loadingIdentity) {
+    content = <div className="min-h-screen flex items-center justify-center text-white">Loading…</div>;
+  } else if (!identity) {
+    content = <IdentityGate onChoose={chooseIdentity} />;
+  } else {
+    content = (
+      <>
+        {hug.banner && (
+          <HugBanner
+            partnerName={partner === "jeff" ? "Jeff" : "Natali"}
+            onOpen={() => { setTab("status"); hug.dismissBanner(); }}
+            onDismiss={hug.dismissBanner}
+          />
+        )}
+        <Header onOpenSettings={() => setSettingsOpen(true)} />
+        <main className="max-w-md mx-auto px-4 pb-28 pt-4">
+          {tab === "status" && (
+            <StatusTab me={identity} partner={partner} hug={hug} presence={presence} location={location} />
+          )}
+          {tab === "pet" && <PetTab me={identity} partner={partner} />}
+          {tab === "question" && <QuestionTab me={identity} partner={partner} />}
+          {tab === "missions" && <MissionsTab me={identity} partner={partner} />}
+          {tab === "play" && <PlayTab me={identity} partner={partner} />}
+        </main>
+        <BottomNav tab={tab} setTab={setTab} me={identity} />
+        {hug.showBurst && <HugBurst />}
+        {settingsOpen && (
+          <ThemeSettings theme={theme} onChange={updateTheme} onClose={() => setSettingsOpen(false)} />
+        )}
+      </>
+    );
   }
 
   return (
-    <div style={{ background: BG }} className="min-h-screen text-white font-body">
+    <div style={{ background: BG, ...themeVars }} className="min-h-screen text-white font-body">
       <GlobalStyle />
-      {hug.banner && (
-        <HugBanner
-          partnerName={partner === "jeff" ? "Jeff" : "Natali"}
-          onOpen={() => { setTab("status"); hug.dismissBanner(); }}
-          onDismiss={hug.dismissBanner}
-        />
-      )}
-      <Header />
-      <main className="max-w-md mx-auto px-4 pb-28 pt-4">
-        {tab === "status" && <StatusTab me={identity} partner={partner} hug={hug} />}
-        {tab === "pet" && <PetTab me={identity} partner={partner} />}
-        {tab === "question" && <QuestionTab me={identity} partner={partner} />}
-        {tab === "missions" && <MissionsTab me={identity} partner={partner} />}
-        {tab === "play" && <PlayTab me={identity} partner={partner} />}
-      </main>
-      <BottomNav tab={tab} setTab={setTab} me={identity} />
-      {hug.showBurst && <HugBurst />}
+      {content}
     </div>
   );
 }
 
 // ---------- Design tokens ----------
 const BG = "linear-gradient(180deg, #0F1B33 0%, #14213D 55%, #1B2A4A 100%)";
-const CORAL = "#FF6F5E";
+// The accent color is user-themeable (see ACCENT_PRESETS) — this reads the
+// --accent CSS variable set on the app root, so every existing CORAL usage
+// picks up the chosen theme without a per-component rewrite.
+const CORAL = "var(--accent, #FF6F5E)";
 const GOLD = "#FFC15E";
 const TEAL = "#35C9C1";
 const CREAM = "#F5EFE6";
@@ -368,9 +565,9 @@ const CREAM = "#F5EFE6";
 function GlobalStyle() {
   return (
     <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Manrope:wght@400;600;700&family=Space+Mono:wght@400;700&display=swap');
-      .font-display { font-family: 'Fraunces', serif; }
-      .font-body { font-family: 'Manrope', sans-serif; }
+      @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Manrope:wght@400;600;700&family=Space+Mono:wght@400;700&family=Poppins:wght@600;700&family=Inter:wght@400;600&family=Caveat:wght@600;700&family=Nunito:wght@400;600&family=Baloo+2:wght@600;700&family=Quicksand:wght@400;600;700&display=swap');
+      .font-display { font-family: var(--font-display, 'Fraunces', serif); }
+      .font-body { font-family: var(--font-body, 'Manrope', sans-serif); }
       .font-mono { font-family: 'Space Mono', monospace; }
       @keyframes pulseDot { 0%,100% { opacity:.3; transform: translateX(0);} 50% { opacity:1; transform: translateX(6px);} }
       @keyframes blink { 0%,90%,100% { transform: scaleY(1);} 95% { transform: scaleY(0.1);} }
@@ -387,8 +584,7 @@ function GlobalStyle() {
 
 function PinGate({ pinInput, setPinInput, pinError, onSubmit }) {
   return (
-    <div style={{ background: BG }} className="min-h-screen flex items-center justify-center px-6 font-body">
-      <GlobalStyle />
+    <div className="min-h-screen flex items-center justify-center px-6 font-body">
       <div className="w-full max-w-xs text-center">
         <div className="mx-auto mb-5 w-14 h-14 rounded-full flex items-center justify-center" style={{ background: CORAL }}>
           <Lock size={22} color={BG === BG ? "#14213D" : "#fff"} />
@@ -419,8 +615,7 @@ function PinGate({ pinInput, setPinInput, pinError, onSubmit }) {
 
 function IdentityGate({ onChoose }) {
   return (
-    <div style={{ background: BG }} className="min-h-screen flex items-center justify-center px-6 font-body">
-      <GlobalStyle />
+    <div className="min-h-screen flex items-center justify-center px-6 font-body">
       <div className="w-full max-w-xs text-center">
         <Heart className="mx-auto mb-4" size={28} color={CORAL} fill={CORAL} />
         <h1 className="font-display text-2xl mb-6" style={{ color: CREAM }}>Who's opening this?</h1>
@@ -438,14 +633,19 @@ function IdentityGate({ onChoose }) {
   );
 }
 
-function Header() {
+function Header({ onOpenSettings }) {
   const houston = useClock(HOUSTON_TZ);
   const danang = useClock(DANANG_TZ);
   return (
     <div className="pt-6 pb-4 px-4 max-w-md mx-auto">
-      <div className="flex items-center gap-2 mb-4">
-        <Heart size={20} color={CORAL} fill={CORAL} />
-        <h1 className="font-display text-xl" style={{ color: CREAM }}>Just Us</h1>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Heart size={20} color={CORAL} fill={CORAL} />
+          <h1 className="font-display text-xl" style={{ color: CREAM }}>Just Us</h1>
+        </div>
+        <button onClick={onOpenSettings} aria-label="Customize theme">
+          <Settings size={18} color="rgba(245,239,230,0.5)" />
+        </button>
       </div>
       <div className="rounded-2xl p-4 bg-white/5 border border-white/10">
         <div className="flex items-center justify-between">
@@ -519,27 +719,44 @@ function SectionCard({ children }) {
 }
 
 // ---------- Status Tab ----------
-function StatusTab({ me, partner, hug }) {
-  const [myStatus, setMyStatus] = useState({ emoji: "🏎️", text: "", tag: "", updatedAt: null });
+function statusSentence(name, status) {
+  const verb = MOOD_SENTENCE[status?.tag] || "hasn't set a mood";
+  let sentence = `${name} ${verb}`;
+  if (status?.text) sentence += ` — "${status.text}"`;
+  return sentence;
+}
+
+function StatusTab({ me, partner, hug, presence, location }) {
+  const [myStatus, setMyStatus] = useState({ text: "", tag: "", updatedAt: null });
   const [theirStatus, setTheirStatus] = useState(null);
+  const [theirStatusUpdatedAt, setTheirStatusUpdatedAt] = useState(null);
   const [text, setText] = useState("");
-  const [saving, setSaving] = useState(false);
+  const [, forceTick] = useState(0);
+
+  const partnerName = partner === "jeff" ? "Jeff" : "Natali";
 
   const load = useCallback(async () => {
     const mine = await safeGet(`status:${me}`, true);
-    const theirs = await safeGet(`status:${partner}`, true);
+    const theirs = await safeGetMeta(`status:${partner}`);
     if (mine) setMyStatus(JSON.parse(mine));
-    if (theirs) setTheirStatus(JSON.parse(theirs));
+    if (theirs.value) {
+      setTheirStatus(JSON.parse(theirs.value));
+      setTheirStatusUpdatedAt(theirs.updatedAt);
+    }
   }, [me, partner]);
 
   useEffect(() => { load(); }, [load]);
 
+  // Keep "2 min ago" ticking without needing a refetch.
+  useEffect(() => {
+    const id = setInterval(() => forceTick((n) => n + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
+
   const save = async (updates) => {
-    setSaving(true);
     const next = { ...myStatus, ...updates, updatedAt: new Date().toISOString() };
     setMyStatus(next);
     await safeSet(`status:${me}`, next, true);
-    setSaving(false);
   };
 
   return (
@@ -547,15 +764,6 @@ function StatusTab({ me, partner, hug }) {
       <HugButton me={me} partner={partner} hug={hug} />
       <SectionCard>
         <p className="text-xs uppercase tracking-wide opacity-50 mb-3" style={{ color: CREAM }}>Your status</p>
-        <div className="flex gap-2 flex-wrap mb-3">
-          {AVATARS.map((a) => (
-            <button key={a} onClick={() => save({ emoji: a })}
-              className={`w-9 h-9 rounded-full flex items-center justify-center text-lg ${myStatus.emoji === a ? "ring-2" : "bg-white/10"}`}
-              style={myStatus.emoji === a ? { background: CORAL, ringColor: CORAL } : {}}>
-              {a}
-            </button>
-          ))}
-        </div>
         <div className="flex gap-2 flex-wrap mb-3">
           {MOOD_TAGS.map((t) => (
             <button key={t} onClick={() => save({ tag: t })}
@@ -578,30 +786,102 @@ function StatusTab({ me, partner, hug }) {
           </button>
         </div>
         {myStatus.text && <p className="text-sm mt-3 opacity-80" style={{ color: CREAM }}>"{myStatus.text}"</p>}
+        <LocationLine location={location.myLocation} />
       </SectionCard>
 
       <SectionCard>
-        <p className="text-xs uppercase tracking-wide opacity-50 mb-3" style={{ color: CREAM }}>
-          {partner === "jeff" ? "Jeff" : "Natali"}'s status
-        </p>
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-xs uppercase tracking-wide opacity-50" style={{ color: CREAM }}>{partnerName}'s status</p>
+          <PresenceDot online={presence.partnerOnline} lastActiveMs={presence.partnerLastActiveMs} />
+        </div>
         {theirStatus ? (
-          <div className="flex items-start gap-3">
-            <div className="w-10 h-10 rounded-full flex items-center justify-center text-xl" style={{ background: "rgba(255,255,255,0.1)" }}>
-              {theirStatus.emoji}
-            </div>
-            <div>
-              {theirStatus.tag && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: GOLD, color: "#14213D" }}>{theirStatus.tag}</span>}
-              <p className="text-sm mt-1" style={{ color: CREAM }}>{theirStatus.text || "No note yet"}</p>
-              <p className="text-[10px] opacity-40 mt-1" style={{ color: CREAM }}>
-                {theirStatus.updatedAt ? new Date(theirStatus.updatedAt).toLocaleString() : ""}
-              </p>
-            </div>
+          <div>
+            <p className="text-sm" style={{ color: CREAM }}>{statusSentence(partnerName, theirStatus)}</p>
+            <p className="text-[10px] opacity-40 mt-1" style={{ color: CREAM }}>
+              {relativeTime(theirStatusUpdatedAt || theirStatus.updatedAt)}
+            </p>
+            <LocationLine location={location.partnerLocation} />
           </div>
         ) : (
           <p className="text-sm opacity-50" style={{ color: CREAM }}>Nothing set yet</p>
         )}
         <button onClick={load} className="text-xs mt-3 opacity-60 underline" style={{ color: CREAM }}>refresh</button>
       </SectionCard>
+    </div>
+  );
+}
+
+function PresenceDot({ online, lastActiveMs }) {
+  const label = online ? "online now" : lastActiveMs != null ? `active ${formatDuration(lastActiveMs)}` : "offline";
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="w-2 h-2 rounded-full" style={{ background: online ? ONLINE_GREEN : "rgba(245,239,230,0.3)" }} />
+      <span className="text-[10px] opacity-50" style={{ color: CREAM }}>{label}</span>
+    </span>
+  );
+}
+
+function LocationLine({ location }) {
+  const clock = useClock(location?.timezone || undefined);
+  if (!location || (!location.city && !location.timezone)) return null;
+  return (
+    <p className="text-[11px] opacity-40 mt-2 flex items-center gap-1" style={{ color: CREAM }}>
+      <MapPin size={10} />
+      {location.city ? `${location.city}${location.region ? `, ${location.region}` : ""} · ${clock.label}` : clock.label}
+    </p>
+  );
+}
+
+function ThemeSettings({ theme, onChange, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center px-4 pb-4 sm:pb-0" onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-2xl p-5 border border-white/10"
+        style={{ background: "#14213D" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <p className="font-display text-lg" style={{ color: CREAM }}>Customize your view</p>
+          <button onClick={onClose} aria-label="Close"><X size={18} color={CREAM} /></button>
+        </div>
+
+        <p className="text-xs uppercase tracking-wide opacity-50 mb-2" style={{ color: CREAM }}>Accent color</p>
+        <div className="flex gap-2 flex-wrap mb-5">
+          {Object.entries(ACCENT_PRESETS).map(([key, preset]) => (
+            <button
+              key={key}
+              onClick={() => onChange({ accent: key })}
+              aria-label={preset.label}
+              className="w-10 h-10 rounded-full flex items-center justify-center"
+              style={{
+                background: preset.hex,
+                outline: theme.accent === key ? "2px solid white" : "none",
+                outlineOffset: 2,
+              }}
+            >
+              {theme.accent === key && <Check size={16} color="#14213D" />}
+            </button>
+          ))}
+        </div>
+
+        <p className="text-xs uppercase tracking-wide opacity-50 mb-2" style={{ color: CREAM }}>Font</p>
+        <div className="space-y-2">
+          {Object.entries(FONT_PRESETS).map(([key, preset]) => (
+            <button
+              key={key}
+              onClick={() => onChange({ font: key })}
+              className="w-full rounded-lg px-3 py-2.5 flex items-center justify-between text-left"
+              style={{ background: theme.font === key ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.05)" }}
+            >
+              <span className="text-base" style={{ fontFamily: preset.display, color: CREAM }}>{preset.label}</span>
+              {theme.font === key && <Check size={14} color={CREAM} />}
+            </button>
+          ))}
+        </div>
+        <p className="text-[10px] opacity-40 mt-4" style={{ color: CREAM }}>
+          This is just for your screen — it won't change how the app looks for your partner.
+        </p>
+      </div>
     </div>
   );
 }

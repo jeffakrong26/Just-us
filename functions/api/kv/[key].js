@@ -1,7 +1,7 @@
 export async function onRequestGet({ params, env }) {
   const key = decodeURIComponent(params.key);
-  const row = await env.DB.prepare("SELECT key, value FROM kv WHERE key = ?").bind(key).first();
-  return Response.json({ key, value: row ? row.value : null });
+  const row = await env.DB.prepare("SELECT key, value, updated_at FROM kv WHERE key = ?").bind(key).first();
+  return Response.json({ key, value: row ? row.value : null, updatedAt: row ? row.updated_at : null });
 }
 
 export async function onRequestPut({ params, env, request }) {
